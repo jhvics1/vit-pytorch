@@ -56,23 +56,53 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
+
 class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0., pool="cls"):
         super().__init__()
+        self.pool = pool
+
         self.layers = nn.ModuleList([])
+        self.reprs = []
+        self.preds = []
+
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
                 PreNorm(dim, Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout)),
-                PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout))
+                PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout)),
+                # nn.Sequential(
+                #     nn.LayerNorm(dim),
+                #     nn.Linear(dim, 1024),
+                #     nn.ReLU(),
+                #     nn.Linear(1024, 128)),
+                # nn.Sequential(
+                #     nn.Linear(128, 512),
+                #     nn.ReLU(),
+                #     nn.Linear(512, 128))
             ]))
-    def forward(self, x):
+
+    def forward(self, x, depth=None):
+        self.reprs = []
+        self.preds = []
+        idx = 0
         for attn, ff in self.layers:
             x = attn(x) + x
             x = ff(x) + x
+            # y = mlp(x.mean(dim = 1) if self.pool == 'mean' else x[:, 0])
+            # z = pred(y)
+            # self.reprs.append(y)
+            # self.preds.append(z)
+            idx += 1
+
+            if depth is not None and depth == idx:
+                break
+        # self.reprs = torch.stack(self.reprs, dim=0)
+        # self.preds = torch.stack(self.preds, dim=0)
         return x
 
+
 class ViT(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0.):
+    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0.):
         super().__init__()
         assert image_size % patch_size == 0, 'Image dimensions must be divisible by the patch size.'
         num_patches = (image_size // patch_size) ** 2
@@ -88,18 +118,20 @@ class ViT(nn.Module):
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
         self.dropout = nn.Dropout(emb_dropout)
 
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout, pool)
 
         self.pool = pool
-        self.to_latent = nn.Identity()
+        self.dim = dim
+        # self.to_latent = nn.Identity()
 
-        self.mlp_head = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, num_classes)
-        )
+        # self.mlp_head = nn.Sequential(
+        #     nn.LayerNorm(dim),
+        #     nn.Linear(dim, num_classes)
+        # )
 
-    def forward(self, img):
-        x = self.to_patch_embedding(img)
+    def forward(self, img, depth=None):
+        with torch.no_grad():
+            x = self.to_patch_embedding(img)
         b, n, _ = x.shape
 
         cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
@@ -107,9 +139,17 @@ class ViT(nn.Module):
         x += self.pos_embedding[:, :(n + 1)]
         x = self.dropout(x)
 
-        x = self.transformer(x)
+        x = self.transformer(x, depth)
 
         x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+        return x
+        # return self.transformer.reprs[-1]
 
-        x = self.to_latent(x)
-        return self.mlp_head(x)
+        # x = self.to_latent(x)
+        # return self.mlp_head(x)
+
+    def layer_repr(self):
+        return self.transformer.reprs
+
+    def layer_pred(self):
+        return self.transformer.preds
